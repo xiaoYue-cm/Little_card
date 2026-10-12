@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Little_card</title>
+<style>html,body{margin:0;height:100%;background:transparent}</style>
+</head>
+<body>
+
+<!-- ============================================================
+     iframe 入口：?card=<id> 指定卡片，其余参数原样转给卡片自己。
+     嵌入示例见 README，页面本身没有任何内容，所以不会有白闪。
+     ============================================================ -->
+<script src="cards.js"></script>
+<script>
+(function () {
+  var q    = new URLSearchParams(location.search);
+  var id   = q.get('card');
+  var list = window.LITTLE_CARDS || [];
+  var hit  = list.filter(function (c) { return c.id === id; })[0];
+
+  if (!hit) {
+    document.body.innerHTML =
+      '<p style="margin:0;padding:14px;font:13px/1.7 system-ui,sans-serif;color:#888">' +
+      '没有这张卡片：<code>' + (id ? id.replace(/[<>&]/g, '') : '(没写 card 参数)') + '</code><br>' +
+      '可选：' + list.map(function (c) { return '<code>' + c.id + '</code>'; }).join(' / ') +
+      '</p>';
+    return;
+  }
+
+  // 只转白名单里的参数，别把乱七八糟的查询串带进卡片
+  var keep = ['u', 'bg'].concat(hit.params.map(function (p) { return p[0]; }));
+  var fwd  = new URLSearchParams();
+  keep.forEach(function (k) { if (q.has(k)) fwd.set(k, q.get(k)); });
+
+  location.replace(hit.file + (fwd.toString() ? '?' + fwd : ''));
+})();
+</script>
+</body>
+</html>

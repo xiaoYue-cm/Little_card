@@ -1,0 +1,12 @@
+# 音频文件默认不进仓库：示例那首是商业唱片，版权 + 体积都不合适。
+# 真想放一段自有或无版权的音频，用 git add -f 单独加。
+*.mp3
+*.m4a
+*.wav
+*.flac
+*.ogg
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,1400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GitHub 贡献热力图卡片</title>
+<style>
+  :root{
+    /* ── 表面 ─────────────────────────────────── */
+    /* 底是纯黑的，所以卡片自己不能再黑下去（再黑就跟背景糊成一片了），
+       改成往上抬一档的中性灰：底色纯黑，卡片、垫层、浮起各差一档，
+       层次全靠明度差，中性色也不跟数据那套绿抢眼 */
+    --canvas:      #000000;
+    --surface:     #0d0d0d;
+    --surface-hi:  #262626;
+    --surface-dn:  #060606;   /* 卡片底下垫着的那一层 */
+    --hairline:    rgba(255,255,255,.08);
+    --hairline-2:  rgba(255,255,255,.12);
+    --seg-bg:      rgba(255,255,255,.05);
+    --seg-on:      rgba(255,255,255,.10);
+
+    /* ── 文字 ─────────────────────────────────── */
+    --ink:         #ededed;
+    --ink-2:       #a6a6a6;
+    --ink-3:       #7d7d7d;
+    --on-dim:      #ffffff;   /* 浅色格子里压字 */
+    --on-lit:      #000000;   /* 深色格子里压字 */
+
+    /* ── 数据色阶：单色相、明度等距 ─────────────── */
+    --lvl-0:       #232323;
+    --lvl-1:       #2a6039;
+    --lvl-2:       #3a834b;
+    --lvl-3:       #4ba65d;
+    --lvl-4:       #60c96b;
+
+    /* ── 尺寸 ─────────────────────────────────── */
+    --cell:        9px;
+    --gap:         2px;
+    --pad:         18px;
+    --r-cell:      1.5px;
+    --r-day:       8px;
+    --r-card:      14px;
+    --r-pop:       6px;
+
+    /* ── 两个视图互相约束出的尺寸 ──────────────────
+       年视图 53 列 × 7 行，格子是正方形：--yh 直接取 --cell。
+       卡片宽度由年视图定：53 × 9 + 52 × 2 = 581 的内容宽。
+       月视图 11 列 × 3 行，31 天铺三行、末尾空 2 格。
+       --mcell 是独立的设计常量，不再由卡宽反推，所以月块只有
+       11 × 33.5 + 10 × 3 = 398.5 宽，靠卡片左边排。
+       面板高度仍由年视图定（91px），月块比它高 15.5px，
+       靠 .view 的居中溢出到面板外面一点，卡片高度因此不用变。 */
+    --mcols:       11;
+    --mgap:        3px;
+    --mcell:       33.5px;
+    --yh:          var(--cell);
+    --panelh:      calc(16px + 7 * var(--yh) + 6 * var(--gap));
+
+    /* 卡片两个宽度：年视图 619，月视图只留月块那一截 436.5。
+       收窄时卡片盒子本身不动（形变用的卡片内坐标才不会失效），
+       动的是 .face 那一层的宽度。 */
+    --w-year:      calc(var(--pad) * 2 + 2px + 53 * var(--cell) + 52 * var(--gap));
+    --w-month:     calc(var(--pad) * 2 + 2px + var(--mcols) * var(--mcell) + (var(--mcols) - 1) * var(--mgap));
+
+    /* ── 动效 ─────────────────────────────────── */
+    --dur-out:     200ms;
+    --dur-morph:   380ms;
+    --clip-slack:  calc(var(--pad) + 1px);   /* 裁边那一层右边多留的余量，见 .view 那段 */
+    --ease-out:    cubic-bezier(.16,1,.3,1);
+    --ease-in:     cubic-bezier(.5,0,.75,0);
+
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+            "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+            "Liberation Mono", monospace;
+  }
+
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; }
+
+  body{
+    min-height:100vh;
+    display:flex; align-items:center; justify-content:center;
+    background:var(--canvas);
+    font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;
+    -moz-osx-font-smoothing:grayscale;
+    padding:24px;
+  }
+
+  .stage{ display:block; }
+
+  /* ══ 卡片 ══════════════════════════════════════
+     这一层只是布局盒子，尺寸全年恒定，所以形变用的卡片内坐标一直成立，
+     格子、面板都不必跟着重排。表面和描边挪到 .face 上，收窄的是那一层。 */
+  .card{
+    position:relative;                 /* 身份牌以卡片左上角为原点往外挂 */
+    width:calc(var(--w-year) - 2px);   /* 少 2px，那条描边由 .face 用 inset:-1px 画回来 */
+    padding:var(--pad);
+  }
+  .face{
+    position:absolute; z-index:-1;
+    left:-1px; top:-1px; bottom:-1px;
+    width:var(--w-year);
+    background:var(--surface);
+    border:1px solid var(--hairline);
+    border-radius:var(--r-card);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.05),
+      0 1px 2px rgba(0,0,0,.6),
+      0 18px 40px -22px rgba(0,0,0,.9);
+    /* 收窄跟格子的形变同一个时长、同一条曲线，整段切换是一次动作 */
+    transition:width var(--dur-morph) var(--ease-out);
+  }
+  /* 卡片底下垫着的那一层：年视图整个被卡片盖住，切到本月卡片收窄之后露出来。
+     上下各缩 8px，才看得出是压在下面的一层，而不是卡片上贴的一块色 */
+  .back{
+    position:absolute; z-index:-2;
+    right:-1px; top:8px; bottom:8px;
+    width:calc(var(--w-year) - var(--w-month));
+    border-radius:0 var(--r-card) var(--r-card) 0;
+    background:var(--surface-dn);
+    border:1px solid var(--hairline);
+    border-left:0;
+    /* 左边缘那圈内阴影当成卡片压在上面的投影，两层的前后关系才立得住 */
+    box-shadow:inset 10px 0 14px -10px rgba(0,0,0,.9);
+  }
+  .card.is-month .face{ width:var(--w-month); }
+
+  /* ── 身份：一个按钮，左端嵌着头像 ─────────────
+     头像是按钮自己的第一个子元素，按钮左边缘缩在它下面 8px，
+     所以两者是一件东西，点哪儿都算按这个按钮。
+     头像 72px、按钮 50px，头像底边跟按钮底边齐平，整块因此往上探 22px；
+     按钮再整体上抬 14px（top:-32px 抵掉卡片 18px 内边距之后还剩 14px），
+     于是按钮底边正好落在内容区顶边，头像顶边探出卡片顶边 53px，
+     头像最左边落在卡片左边框上。
+     position:absolute 所以不占卡片内部高度，面板照样顶到顶部。 */
+  .tag{
+    position:absolute;
+    top:-32px; left:7px;                 /* 头像往左压出 8px，按钮左边缘正好在它下面 */
+    display:inline-flex; align-items:center; gap:13px;
+    height:50px;
+    padding:0 24px 0 0;
+    border-radius:14px;
+    background:var(--surface-hi);
+    border:1px solid rgba(255,255,255,.09);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.06),
+      0 14px 26px -14px rgba(0,0,0,.95);
+    /* 倾角 / 磁吸 / 抬起 / 缩放四个量全部由 JS 每帧写进变量，
+       所以这里不能给 transform 加过渡，否则每帧变一次的目标值会被拖成糊的 */
+    transform:
+      perspective(700px)
+      rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg))
+      translate(var(--mag-x, 0px), var(--mag-y, 0px))
+      translateY(var(--lift, 0px))
+      scale(var(--sc, 1));
+    font:inherit;
+    color:inherit;
+    cursor:pointer;
+    -webkit-tap-highlight-color:transparent;
+    transition:
+      background   180ms var(--ease-out),
+      border-color 180ms var(--ease-out),
+      box-shadow   180ms var(--ease-out);
+  }
+  /* 指针光斑：跟着指针走的一小片高光，倾斜才像块实物而不是贴纸 */
+  .tag::after{
+    content:'';
+    position:absolute; inset:0;
+    border-radius:inherit;
+    pointer-events:none;
+    background:radial-gradient(90px 56px at var(--hx, 50%) var(--hy, 50%),
+                               rgba(255,255,255,.10), rgba(255,255,255,0) 72%);
+    opacity:0;
+    transition:opacity 180ms var(--ease-out);
+  }
+  /* 波纹要裁在按钮形状里，但按钮本身不能 overflow:hidden，
+     那样会把探出去的头像一起切掉，所以单开一层做裁剪 */
+  .fx{
+    position:absolute; inset:0;
+    border-radius:inherit;
+    overflow:hidden;
+    pointer-events:none;
+  }
+  .ripple{
+    position:absolute;
+    border-radius:50%;
+    /* 这里只管形状，中间实、边缘化开；亮度整条交给动画的 opacity。
+       两边各降一次透明度的话叠起来只剩 6%，等于白做 */
+    background:radial-gradient(circle,
+               rgba(255,255,255,.92), rgba(255,255,255,.38) 58%, rgba(255,255,255,0) 76%);
+  }
+  /* 按下压回卡片，投影同时收紧；抬起和缩放由 JS 那边一起推，
+     所以这里只管颜色和投影 */
+  .tag:active{
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,.04),
+      0 6px 14px -10px rgba(0,0,0,.95);
+    transition-duration:100ms;
+  }
+  .tag:focus-visible{ outline:2px solid var(--lvl-3); outline-offset:3px; }
+
+  /* 首屏入场：整块从卡片上沿落到位，头像晚 80ms 跟上。
+     和格子的入场是同一套内外错峰，只是方向换成从上往下 */
+  .tag.in{ animation:tag-in 420ms var(--ease-out) 60ms both; }
+  .tag.in .avatar{ animation:avatar-in 460ms var(--ease-out) 140ms both; }
+  @keyframes tag-in{
+    from{ opacity:0; transform:translateY(-12px); }
+  }
+  @keyframes avatar-in{
+    from{ opacity:0; transform:translateY(1px) scale(.85); }
+  }
+
+  .tag .avatar{
+    flex:0 0 auto;
+    align-self:flex-end;                 /* 底边跟按钮底边齐平 */
+    width:72px; height:72px;
+    margin-left:-9px;
+    transform:translateY(1px);           /* 补掉按钮那 1px 描边 */
+    border-radius:50%;
+    display:grid; place-items:center;
+    background:var(--surface-hi);
+    border:1px dashed rgba(255,255,255,.24);
+    box-shadow:0 14px 26px -14px rgba(0,0,0,.95);
+    color:var(--ink-3);
+    transition:border-color 180ms var(--ease-out);
+  }
+  .tag .avatar svg{ width:34px; height:34px; display:block; }
+  /* 真头像：<img class="avatar-img" src="..." alt=""> */
+  .avatar-img{
+    width:100%; height:100%;
+    border-radius:50%;
+    object-fit:cover;
+    display:block;
+  }
+  /* 第二行的来源标注：图标 + 字样，压在名字底下。
+     字号比 @用户名 还小一档，颜色却比它亮，不然 11px 在深色上糊得看不清 */
+  .tag .id{
+    display:flex; flex-direction:column; gap:5px;
+    align-items:flex-start;
+    min-width:0;
+  }
+  .tag .id-top{
+    display:flex; align-items:baseline; gap:10px;
+    min-width:0;
+  }
+  .tag .src{
+    display:flex; align-items:center; gap:5px;
+    font-size:11px; line-height:1; font-weight:500;
+    color:var(--ink-2);
+    transition:color 180ms var(--ease-out);
+  }
+  .tag .src .gh{ width:12px; height:12px; fill:currentColor; display:block; }
+  .tag .name{
+    font-size:17px; line-height:1; font-weight:600;
+    color:var(--ink);
+    max-width:240px;
+    overflow:hidden; text-overflow:ellipsis;
+  }
+  .tag .handle{
+    font-family:var(--mono);
+    font-size:13px; line-height:1;
+    color:var(--ink-3);
+    max-width:160px;
+    overflow:hidden; text-overflow:ellipsis;
+    transition:color 180ms var(--ease-out);
+  }
+  /* 占位样式：填了真内容之后 JS 会把 .is-slot 摘掉 */
+  .tag.is-slot .name, .tag.is-slot .handle{
+    border-bottom:1px dashed rgba(255,255,255,.18);
+    padding-bottom:2px;
+  }
+
+  /* ── 第一行：合计 / 视图切换 ─────────────────────
+     往上提 8px，抵掉卡片上边距，面板那边补回来，卡片总高不变。
+     月视图里跟着卡片右边缘一起往左收，用的是 transform，不走布局 */
+  .head{
+    display:flex; align-items:center; gap:12px;
+    margin-top:-8px;
+    transition:transform var(--dur-morph) var(--ease-out);
+  }
+  .card.is-month .head{ transform:translateX(calc(var(--w-month) - var(--w-year))); }
+
+  /* ── 视图切换 ─────────────────────────────────── */
+  .seg{
+    position:relative;
+    display:flex;
+    padding:2px;
+    border:1px solid var(--hairline);
+    border-radius:7px;
+    background:var(--seg-bg);
+  }
+  .seg-ind{
+    position:absolute;
+    top:2px; left:2px;
+    width:56px; height:22px;
+    border-radius:5px;
+    background:var(--seg-on);
+    /* 一点点过冲再落回，滑块才像是被推过去而不是直接换了个位置。
+       过冲量压在 2px 以内，正好留在 .seg 那圈 2px 内边距里 */
+    transition:transform 260ms cubic-bezier(.3,1.1,.4,1);
+  }
+  .seg button{
+    position:relative;
+    width:56px; height:22px;
+    padding:0;
+    border:0;
+    background:none;
+    font:inherit;
+    font-size:10px;
+    line-height:1;
+    color:var(--ink-3);
+    border-radius:5px;
+    cursor:pointer;
+    -webkit-tap-highlight-color:transparent;
+    transition:color 140ms var(--ease-out), transform 110ms var(--ease-out);
+  }
+  .seg button[aria-selected="true"]{ color:var(--ink); }
+  .seg button:active{ transform:scale(.94); }
+  .seg button:focus-visible{ outline:2px solid var(--lvl-3); outline-offset:1px; }
+
+  /* ── 合计：挪进第一行，贴着右边缘，省下一整行高度 ── */
+  .total{
+    margin-left:auto;
+    display:flex; flex-direction:column; align-items:flex-end; gap:5px;
+  }
+  .total b{
+    font-family:var(--mono);
+    font-size:22px; line-height:1; font-weight:500;
+    font-variant-numeric:tabular-nums;
+    letter-spacing:-.03em;
+    color:var(--ink);
+  }
+  .micro{
+    font-size:9px; line-height:1;
+    letter-spacing:.05em;
+    color:var(--ink-3);
+  }
+
+  /* ── 数据区 ───────────────────────────────────── */
+  /* 固定高度，两个视图共用。卡片尺寸因此完全不随切换变化，
+     形变过程里也就没有任何布局动画 */
+  .panel{
+    position:relative;
+    margin-top:20px;                 /* 12 + 第一行让出来的 8 */
+    height:var(--panelh);
+  }
+  .view{
+    /* 右边一直顶到卡片右边缘：格子的悬浮描边往外画 3px，年视图最右一列
+       本来就画在卡片内边距上，要裁边的那一层不能正好卡在格子的边框上 */
+    position:absolute; inset:0 calc(-1 * var(--clip-slack)) 0 0;
+    display:flex; flex-direction:column; justify-content:center;
+  }
+  .view.off{ visibility:hidden; pointer-events:none; }
+
+  /* 年视图的右边界：切到本月时跟着卡片一起往里收。退场里飘在旧位置的那些列
+     不裁就会从收窄后的卡片里探出来。裁的是没有底色、没有描边的一层，
+     裁边本身看不见，看着就是卡片压着那些列滑过去 */
+  .view-year{
+    /* 上左下各让 6px 出来，再用 padding 把格子让回原位：格子的悬浮描边往外画 3px，
+       第一列的左边和下边那一圈正好压在面板边缘上，裁边就会把它削掉一条。
+       右边不动，裁边的位置是按这一层的右边缘算的 */
+    top:-6px; bottom:-6px; left:-6px;
+    padding:6px; padding-right:0;
+    clip-path:inset(0 0 0 0);
+    transition:clip-path var(--dur-morph) var(--ease-out);
+  }
+  .card.is-month .view-year{
+    /* 这一层的右边正好落在卡片右边缘上，所以裁掉的就是卡片收窄的那一段，
+       跟 .face 的宽度同一条时间线，裁边每一帧都贴着卡片右边走 */
+    clip-path:inset(0 calc(var(--w-year) - var(--w-month)) 0 0);
+  }
+
+  .labels{
+    height:11px;
+    display:grid;
+    grid-template-columns:repeat(53, var(--cell));
+    gap:var(--gap);
+    margin-bottom:5px;
+  }
+  .labels.year span{
+    grid-row:1;
+    font-size:9px; line-height:1;
+    color:var(--ink-3);
+    white-space:nowrap;
+  }
+
+  .grid{ position:relative; }
+  /* 年视图：53 列 × 7 行，格子 9 × 9 正方形 */
+  .grid.year{
+    display:grid;
+    grid-auto-flow:column;
+    grid-template-rows:repeat(7, var(--yh));
+    grid-auto-columns:var(--cell);
+    gap:var(--gap);
+  }
+
+  .cell{
+    width:var(--cell); height:var(--yh);
+    border-radius:var(--r-cell);
+    background:var(--lvl-0);
+    display:block;
+  }
+  .cell[data-lv="1"]{ background:var(--lvl-1); }
+  .cell[data-lv="2"]{ background:var(--lvl-2); }
+  .cell[data-lv="3"]{ background:var(--lvl-3); }
+  .cell[data-lv="4"]{ background:var(--lvl-4); }
+  /* 年视图里未来那几天：几乎看不见的描边 */
+  .cell.void{ background:transparent; box-shadow:inset 0 0 0 1px rgba(255,255,255,.045); }
+  /* 月视图里还没到的日子：淡淡填一层 + 灰日期，日历结构还在但不抢戏 */
+  .grid.month .cell.void{
+    background:rgba(255,255,255,.025);
+    box-shadow:none;
+    color:var(--ink-3);
+    font-weight:400;
+  }
+
+  /* 首屏入场：只播一次，位置由内外两层错开成对角线 */
+  .grid.wave .cell{
+    animation:cell-in var(--dur-morph) var(--ease-out) both;
+    animation-delay:calc(var(--d) * 4ms);
+  }
+  @keyframes cell-in{
+    from{ opacity:0; transform:scale(.7); }
+    to  { opacity:1; transform:scale(1); }
+  }
+
+  /* 年视图退场：当月那一列留下，其余按离得远近依次上滑淡出。
+     错峰按格子到当月那几列的距离算，但封顶 8 列：不封顶的话最远那几列
+     要等三百多毫秒才起步，而卡片 380ms 就收完了，等于白等。
+     退场和形变同一条时间线，两边一起跑 */
+  .grid.year .cell{
+    /* 亮度那条曲线不是纯 ease-out：那条前段太快，格子还没滑走就没了；
+       这条先慢慢起、中段收干、尾巴软，看着是化开不是断电。
+       位移那条反过来用 ease-in，格子是越走越快被拎走的 */
+    transition:opacity var(--dur-out) cubic-bezier(.25,.6,.45,1),
+               transform var(--dur-out) var(--ease-in);
+    transition-delay:calc(min(var(--s, 0), 8) * 5ms);
+  }
+  /* 当月那一列不上滑淡出：它的活交给月视图那批格子，形变一起步就顶替过来 */
+  .grid.year .cell.keep{ transition:none; }
+  .view-year.out .grid.year .cell:not(.keep){
+    opacity:0;
+    transform:translateY(-14px);
+  }
+  /* 切到本月时，形变过来的月格子正好盖住留下的这一列，立刻让位。
+     留在这儿的话，那 31 个小格会一直杵在卡片中间等形变演完 */
+  .card.is-month .grid.year .cell.keep{ opacity:0; }
+  .view-year .labels.year{
+    transition:opacity var(--dur-out) var(--ease-out);
+  }
+  .view-year.out .labels.year{ opacity:0; }
+
+  /* ── 月视图：11 列 × 3 行，正方形格子 ─────────────
+     31 天按顺序铺开，不按星期对齐。11 列铺不满卡片宽度，
+     所以整块居中放（见顶部 --mcols 那段注释）*/
+  .grid.month{
+    display:grid;
+    grid-template-columns:repeat(var(--mcols), var(--mcell));
+    justify-content:start;                 /* 11 列铺不满，整块靠左，让出右边给合计那一栏 */
+    gap:var(--mgap);
+  }
+  .grid.month .cell{
+    width:var(--mcell); height:var(--mcell);
+    border-radius:6px;
+    display:grid;
+    place-items:center;
+    font-size:12px;
+    font-weight:500;
+    font-variant-numeric:tabular-nums;
+    color:var(--on-dim);
+  }
+  .grid.month .cell[data-lv="3"],
+  .grid.month .cell[data-lv="4"]{ color:var(--on-lit); }
+  .grid.month .cell.blank{ background:transparent; }
+
+  /* ── 悬浮提示 ─────────────────────────────────── */
+  .tip{
+    position:absolute;
+    z-index:2;
+    left:0; top:0;
+    padding:5px 8px;
+    background:var(--surface-hi);
+    border:1px solid var(--hairline-2);
+    border-radius:var(--r-pop);
+    box-shadow:0 6px 18px -6px rgba(0,0,0,.85);
+    font-size:10px; line-height:1;
+    white-space:nowrap;
+    color:var(--ink);
+    pointer-events:none;
+    opacity:0;
+    transform:translate(-50%,-100%) scale(.95);
+    transform-origin:bottom center;
+    transition:opacity 140ms var(--ease-out), transform 140ms var(--ease-out);
+  }
+  .tip.on{ opacity:1; transform:translate(-50%,-100%) scale(1); }
+
+  /* 键盘游标：和悬浮同一套描边，鼠标和键盘看到的是同一个东西 */
+  .cell.cursor{
+    box-shadow:0 0 0 2px var(--surface), 0 0 0 3px rgba(255,255,255,.38);
+  }
+  .grid:focus{ outline:none; }              /* 焦点指示由上面的格子描边承担 */
+  .grid:focus-visible .cell.cursor{
+    box-shadow:0 0 0 2px var(--surface), 0 0 0 3px var(--lvl-4);
+  }
+
+  /* 只给读屏用的播报区 */
+  .sr{
+    position:absolute; width:1px; height:1px;
+    margin:-1px; padding:0; border:0;
+    overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap;
+  }
+
+  @media (hover:hover){
+    /* 悬浮：整块抬起来 2px，投影跟着拉长，虚线圈和 @用户名 各亮一档。
+       底色和描边按下时留着，只有抬起和投影让位给按压，
+       所以拆成两条：一条不带 :not(:active)，一条带 */
+    .tag:hover{
+      background:#303030;
+      border-color:rgba(255,255,255,.14);
+    }
+    .tag:hover:not(:active){
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.09),
+        0 20px 32px -16px rgba(0,0,0,.95);
+    }
+    .tag:hover::after{ opacity:1; }
+    .tag:hover .avatar{ border-color:rgba(255,255,255,.42); }
+    .tag:hover .handle{ color:var(--ink-2); }
+    .tag:hover .src{ color:var(--ink); }
+    .cell:not(.void):hover{
+      box-shadow:0 0 0 2px var(--surface), 0 0 0 3px rgba(255,255,255,.28);
+    }
+  }
+
+  @media (prefers-reduced-motion:reduce){
+    .grid.wave .cell{ animation:none; }
+    .panel, .tip, .seg-ind, .seg button{ transition:none; }
+    .grid.year .cell{ transition:none; }
+    .tag, .tag .avatar, .tag .handle, .tag .src, .tag::after{ transition:none; }
+    .face, .head, .view-year{ transition:none; }
+    .tag.in, .tag.in .avatar{ animation:none; }
+    .tip{ transform:translate(-50%,-100%); }
+    .tip.on{ transform:translate(-50%,-100%); }
+  }
+
+  @media (max-width:540px){ body{ padding:12px; } }
+</style>
+</head>
+<body>
+
+<div class="stage" id="stage">
+<div class="card" id="card">
+  <span class="back" aria-hidden="true"></span>
+  <span class="face" aria-hidden="true"></span>
+  <button class="tag" id="tag" type="button">
+    <span class="fx" id="fx" aria-hidden="true"></span>
+    <span class="avatar" id="avatar">
+      <img class="avatar-img" src="https://avatars.githubusercontent.com/u/185566585?v=4"
+           width="72" height="72" alt="">
+    </span>
+    <span class="id">
+      <span class="id-top">
+        <span class="name" id="name">CerYin</span>
+        <span class="handle" id="handle">@xiaoYue-cm</span>
+      </span>
+      <span class="src">
+        <svg class="gh" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
+                   0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13
+                   -.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66
+                   .07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15
+                   -.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27
+                   c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15
+                   0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2
+                   0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        <span>GitHub</span>
+      </span>
+    </span>
+  </button>
+
+  <div class="head">
+    <div class="total">
+      <b id="count">0</b>
+      <span class="micro" id="unit">本年贡献</span>
+    </div>
+
+    <div class="seg" id="seg" role="tablist" aria-label="视图">
+      <span class="seg-ind" id="segInd" aria-hidden="true" style="transform:translateX(56px)"></span>
+      <button type="button" role="tab" id="tabMonth" aria-selected="false" aria-controls="panel" tabindex="-1">本月</button>
+      <button type="button" role="tab" id="tabYear"  aria-selected="true"  aria-controls="panel" tabindex="0">本年</button>
+    </div>
+  </div>
+
+  <div class="panel" id="panel" role="tabpanel" aria-labelledby="tabYear">
+    <div class="view view-year" id="viewYear">
+      <div class="labels year" id="labelsYear" aria-hidden="true"></div>
+      <div class="grid year" id="gridYear" role="group" tabindex="0" aria-label=""></div>
+    </div>
+    <div class="view view-month off" id="viewMonth" aria-hidden="true">
+      <div class="grid month" id="gridMonth" role="group" tabindex="0" aria-label=""></div>
+    </div>
+    <p class="sr" id="live" aria-live="polite"></p>
+  </div>
+</div>
+</div>
+
+<script>
+/* ══════════════ 身份 ══════════════
+   页面滑到这段就把 GitHub 上的资料和贡献取回来填进去，
+   这里的默认值只是首帧的占位，不是最终数据。
+   name / handle / avatar / url 在拉到资料后会被真值覆盖。
+   ════════════════════════════════════ */
+/* 账号优先取 ?user= 参数，没给就用默认值（详见文件末尾的参数说明） */
+var GITHUB_USER = new URLSearchParams(location.search).get('user') || "xiaoYue-cm";
+var CARD = {
+  name:   "CerYin",
+  handle: "@xiaoYue-cm",
+  avatar: "https://avatars.githubusercontent.com/u/185566585?v=4",
+  url:    "https://github.com/xiaoYue-cm",
+  data:   null
+};
+
+var ROWS = 371;   /* 53 列 × 7 行，刚好铺满一个日历年所需的最多周数 */
+/* 月视图列数，跟 CSS 的 --mcols 是同一个数，从这里读，只留一处真相。
+   方向键导航和命中映射都按它算行列 */
+var MCOLS = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--mcols'), 10) || 11;
+var MROWS = 3;
+
+/* 演示数据：确定性生成。工作日/周末节奏 + 冲刺期 + 冷淡期 */
+function demoData(n){
+  var seed = 20260661;
+  function rnd(){ seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    var t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296; }
+  var dow = [1.30, 1.40, 1.35, 1.25, 1.00, 0.30, 0.35];  // 一..日
+  var seasons = [0.45, 0.8, 1.0, 1.35, 1.8];
+  var out = [], season = 1, burst = 0, quiet = 0;
+  for (var i = 0; i < n; i++){
+    if (i % 7 === 0 && rnd() < .17) season = seasons[Math.floor(rnd() * seasons.length)];
+    if (quiet > 0){ quiet--; out.push(rnd() < .18 ? 1 : 0); continue; }
+    if (burst > 0){ burst--; out.push(Math.min(26, Math.round(season * (3.5 + rnd() * 6)))); continue; }
+    if (rnd() < .05){ burst = 2 + Math.floor(rnd() * 5); }
+    if (rnd() < .028){ quiet = 6 + Math.floor(rnd() * 10); }
+    var m = season * dow[i % 7];
+    if (rnd() > .66 * m){ out.push(0); continue; }
+    var v = Math.round(rnd() * rnd() * rnd() * 12 * m + rnd() * 1.3);
+    out.push(Math.min(26, Math.max(1, v)));
+  }
+  return out;
+}
+
+/* ── 日期工具（周一为一周之首）───────────────── */
+function monday(d){
+  var x = new Date(d); x.setHours(0,0,0,0);
+  x.setDate(x.getDate() - (x.getDay() + 6) % 7);
+  return x;
+}
+function addDays(d, n){ var x = new Date(d); x.setDate(x.getDate() + n); return x; }
+function key(d){ return d.getFullYear() + '-' + (d.getMonth()+1) + '-' + d.getDate(); }
+function iso(d){ var m = d.getMonth()+1, dd = d.getDate();
+  return d.getFullYear() + '-' + (m<10?'0':'') + m + '-' + (dd<10?'0':'') + dd; }
+function fmtFull(d){ return d.getFullYear() + '年' + (d.getMonth()+1) + '月' + d.getDate() + '日'; }
+function fmtNum(n){ return n.toLocaleString('zh-CN'); }
+function level(v){
+  if (v <= 0)  return 0;
+  if (v <= 2)  return 1;
+  if (v <= 5)  return 2;
+  if (v <= 10) return 3;
+  return 4;
+}
+
+/* ── 数据 ─────────────────────────────────────── */
+/* 年视图排的是日历本年：1 月 1 日到 12 月 31 日，不是「今天往前推一年」。
+   网格仍按周排，起点取「1 月 1 日所在那一周的周一」，
+   1 月 1 日之前、12 月 31 日之后的那几格留空。
+   日期轴和汇总都从这里算，取到真数据时会带着新的一批重算一遍 */
+var YEAR, jan1, dec31;
+var today, start, days = [], data = [], byDate = {}, inMonth = {};
+var totalYear = 0, topYear, mFirst, mLast, mDays = 0, totalMonth = 0, topMonth, MONTH_LABEL = '';
+
+function computeData(raw, year){
+  YEAR  = year || new Date().getFullYear();
+  jan1  = new Date(YEAR, 0, 1);
+  dec31 = new Date(YEAR, 11, 31);
+
+  today = new Date(); today.setHours(0,0,0,0);
+  start = monday(jan1);
+  days = [];
+  for (var i = 0; i < ROWS; i++) days.push(addDays(start, i));
+
+  data = raw;
+  byDate = {}; inMonth = {};
+  totalYear = 0; topYear = { v:-1, d: jan1 };
+  mFirst = new Date(today.getFullYear(), today.getMonth(), 1);
+  mLast  = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  mDays  = mLast.getDate();
+  totalMonth = 0; topMonth = { v:-1, d: mFirst };
+  /* 月视图那一行合计下面写的不是「本月贡献」，是具体哪个月：
+     「本月」只是个相对说法，看的人得知道到底在看哪一段 */
+  MONTH_LABEL = today.getFullYear() + '年' + (today.getMonth() + 1) + '月';
+
+  for (var j = 0; j < ROWS; j++){
+    var d0 = days[j];
+    byDate[key(d0)] = data[j];
+    if (d0 >= mFirst && d0 <= mLast) inMonth[key(d0)] = true;
+    /* 只统计本年、且已经过去的那些天 */
+    if (d0 >= jan1 && d0 <= dec31 && d0 <= today){
+      totalYear += data[j];
+      if (data[j] > topYear.v) topYear = { v:data[j], d:d0 };
+      if (d0 >= mFirst){
+        totalMonth += data[j];
+        if (data[j] > topMonth.v) topMonth = { v:data[j], d:d0 };
+      }
+    }
+  }
+}
+
+/* ── 身份：把 CARD 里的值写进按钮 ─────────────── */
+function applyIdentity(){
+  document.getElementById('name').textContent   = CARD.name;
+  document.getElementById('handle').textContent = CARD.handle;
+
+  var box = document.getElementById('avatar');
+  if (CARD.avatar){
+    var im = box.querySelector('img.avatar-img');
+    if (!im){
+      im = document.createElement('img');
+      im.className = 'avatar-img'; im.alt = '';
+      box.textContent = ''; box.appendChild(im);
+    }
+    im.src = CARD.avatar;
+    box.style.border = '0';
+  }
+  var tagEl = document.getElementById('tag');
+  if (CARD.name !== "你的名字" && CARD.handle !== "@username"){
+    tagEl.classList.remove('is-slot');
+  }
+  if (CARD.url){
+    tagEl.setAttribute('aria-label', '打开 ' + (CARD.handle || CARD.name) + ' 的主页');
+  }
+}
+
+/* 名字按钮：填了 url 才真的能点走。url 在拉到资料后可能才补上，
+   所以点击时再读，不用把当时的空值闭包进去 */
+document.getElementById('tag').addEventListener('click', function(){
+  if (CARD.url) window.open(CARD.url, '_blank', 'noopener');
+});
+
+/* ── 元素 ─────────────────────────────────────── */
+var cardEl      = document.getElementById('card');
+var panelEl     = document.getElementById('panel');
+var viewYear    = document.getElementById('viewYear');
+var viewMonth   = document.getElementById('viewMonth');
+var gridYear    = document.getElementById('gridYear');
+var gridMonth   = document.getElementById('gridMonth');
+var labelsYear  = document.getElementById('labelsYear');
+var countEl     = document.getElementById('count');
+var unitEl      = document.getElementById('unit');
+var ind         = document.getElementById('segInd');
+var tabs = { month: document.getElementById('tabMonth'), year: document.getElementById('tabYear') };
+
+function cellHTML(d, v, lv, cls, text, style){
+  return '<span class="cell' + (cls ? ' ' + cls : '') +
+         '" data-lv="' + lv + '" data-v="' + v + '" data-k="' + key(d) +
+         '" data-d="' + fmtFull(d) + '"' +
+         (style ? ' style="' + style + '"' : '') +
+         ' aria-hidden="true">' + (text || '') + '</span>';
+}
+
+/* ── 年视图 ───────────────────────────────────── */
+function renderYear(wave){
+  var mCol0 = Math.floor(days.indexOf(mFirst) / 7);
+  var mCol1 = Math.floor(days.indexOf(mLast) / 7);
+
+  var html = '';
+  for (var i = 0; i < ROWS; i++){
+    var d = days[i];
+    var inYear = d >= jan1 && d <= dec31;      /* 落在本年之内 */
+    var future = d > today;
+    var v  = (inYear && !future) ? data[i] : 0;
+    var lv = (inYear && !future) ? level(v) : 0;
+    var col = Math.floor(i / 7), row = i % 7;
+    var s = col < mCol0 ? mCol0 - col : (col > mCol1 ? col - mCol1 : 0);
+    var isM = inYear && d >= mFirst && d <= mLast;
+    html += cellHTML(d, v, lv,
+      ((!inYear || future) ? 'void ' : '') + (isM ? 'keep' : ''),
+      '', '--d:' + (col + row) + ';--s:' + s);
+  }
+  gridYear.innerHTML = html;
+  if (wave) gridYear.classList.add('wave');
+
+  labelsYear.innerHTML = '';
+  var last = -9;
+  for (i = 0; i < ROWS; i++){
+    /* 只标本年每个月的 1 号，本年之外那几格不参与，免得开头冒出个「12月」 */
+    var ld = days[i];
+    if (ld < jan1 || ld > dec31 || ld.getDate() !== 1) continue;
+    var c = Math.floor(i / 7) + 1;
+    /* 月份标签大约占 2 列（9px 字号 × 11px 列宽），留 1 列空就够。
+       相隔最近的月份也至少有 4 列，门槛放到 3 只为补回被挤掉的那一处 */
+    if (c - last >= 3){
+      var sp = document.createElement('span');
+      sp.style.gridColumn = c;
+      sp.textContent = (ld.getMonth() + 1) + '月';
+      labelsYear.appendChild(sp);
+      last = c;
+    }
+  }
+
+  gridYear.setAttribute('aria-label',
+    '贡献热力图，' + YEAR + ' 年，1 月 1 日至 12 月 31 日。截至今天共 ' +
+    fmtNum(totalYear) + ' 次贡献，最活跃的一天是 ' +
+    fmtFull(topYear.d) + '，' + topYear.v + ' 次。方向键可逐日查看。');
+  buildMap(gridYear);
+}
+
+/* ── 月视图：方阵网格 ─────────────────────────── */
+function renderMonth(){
+  /* 11 列 × 3 行，31 天按顺序铺。月长 28~31 都落在 3 行里，行数恒定 */
+  var slots = MCOLS * MROWS;
+  var html = '';
+  for (var n = 0; n < slots; n++){
+    var dn = n + 1;
+    if (dn > mDays){
+      html += '<span class="cell blank" aria-hidden="true"></span>';
+      continue;
+    }
+    var d = new Date(today.getFullYear(), today.getMonth(), dn);
+    var future = d > today;
+    var v = future ? 0 : (byDate[key(d)] || 0);
+    html += cellHTML(d, v, future ? 0 : level(v), future ? 'void' : '', String(dn));
+  }
+  gridMonth.innerHTML = html;
+
+  gridMonth.setAttribute('aria-label',
+    '贡献热力图，本月。' + today.getFullYear() + '年' + (today.getMonth() + 1) +
+    '月共 ' + fmtNum(totalMonth) + ' 次贡献，最活跃的一天是 ' +
+    fmtFull(topMonth.d) + '，' + topMonth.v + ' 次。方向键可逐日查看。');
+  buildMap(gridMonth);
+}
+
+/* ══ 格子的定位与选中 ══
+   年视图格子只有 9px，要求用户精准命中不合理，格子之间的 2px 缝隙更是死区。
+   所以命中判定不走 event.target，改成在网格里找离指针最近的那一格，
+   整块网格都是有效区域，缝隙由相邻格自动接管。 */
+var liveEl = document.getElementById('live');
+var tipEl  = null;
+
+function buildMap(grid){
+  var at = {}, list = [], cells = grid.querySelectorAll('.cell');
+  var w = 0, h = 0;
+  for (var i = 0; i < cells.length; i++){
+    var c = cells[i];
+    if (!c.dataset.k) continue;
+    var col = Math.floor(i / 7), row = i % 7;          // 年视图：列=周
+    if (grid.classList.contains('month')){ col = i % MCOLS; row = Math.floor(i / MCOLS); }
+    at[row + ',' + col] = c;
+    list.push({ el:c, x:c.offsetLeft + c.offsetWidth / 2, y:c.offsetTop + c.offsetHeight / 2 });
+    /* 格子铺到哪儿为止。容器本身不能当依据：月视图的网格铺不满那一行，
+       被 flex 拉满到卡片宽度了，右半边是空的 */
+    w = Math.max(w, c.offsetLeft + c.offsetWidth);
+    h = Math.max(h, c.offsetTop + c.offsetHeight);
+  }
+  grid._at = at;
+  grid._centers = list;
+  grid._box = { w:w, h:h };
+}
+
+function nearest(grid, px, py){
+  var list = grid._centers, best = null, bd = Infinity;
+  for (var i = 0; i < list.length; i++){
+    var dx = list[i].x - px, dy = list[i].y - py, d = dx * dx + dy * dy;
+    if (d < bd){ bd = d; best = list[i].el; }
+  }
+  return best;
+}
+
+function showTip(cell){
+  if (!tipEl || !cell) return;
+  var grid = cell.closest('.grid');
+  var v = +cell.dataset.v;
+  var txt = (v === 0 ? '没有贡献' : v + ' 次贡献') + ' · ' + cell.dataset.d;
+  tipEl.textContent = txt;
+  /* offsetLeft/Top 是不受 scale 影响的布局值，卡片整体缩小时也不会错位 */
+  var half = tipEl.offsetWidth / 2;
+  /* 边界用格子铺到哪儿为止，不用容器宽度：容器右边多留了一截给裁边 */
+  var lim = (grid._box ? grid._box.w : grid.clientWidth) - half;
+  var x = Math.min(Math.max(cell.offsetLeft + cell.offsetWidth / 2, half), lim);
+  tipEl.style.left = x + 'px';
+  tipEl.style.top  = (grid.offsetTop + cell.offsetTop - 7) + 'px';
+  tipEl.classList.add('on');
+}
+function hideTip(){ if (tipEl) tipEl.classList.remove('on'); }
+
+if (window.matchMedia('(hover:hover)').matches){
+  tipEl = document.createElement('div');
+  tipEl.className = 'tip';
+  panelEl.appendChild(tipEl);
+
+  panelEl.addEventListener('mousemove', function(e){
+    var grid = view === 'year' ? gridYear : gridMonth;
+    var r = grid.getBoundingClientRect();
+    if (!r.width) return;
+    var s  = r.width / grid.offsetWidth;               // 卡片被整体缩小时的比例
+    var px = (e.clientX - r.left) / s;
+    var py = (e.clientY - r.top) / s;
+    var c0 = grid._centers.length ? grid._centers[0].el : null;
+    var bx = grid._box ? grid._box.w : grid.offsetWidth;
+    var by = grid._box ? grid._box.h : grid.offsetHeight;
+    /* 四个方向都留半格：格与格之间的缝由最近的那格接管，再往外就不该有提示。
+       右边尤其要卡住，月视图月块右边那块是卡片底下垫着的，本来就在卡片外面，
+       在那儿还弹提示会像是悬在一格上 */
+    var mx = c0 ? (c0.offsetWidth  + 2) / 2 : 4;
+    var my = c0 ? (c0.offsetHeight + 2) / 2 : 4;
+    if (px < -mx || px > bx + mx || py < -my || py > by + my){ hideTip(); return; }
+    showTip(nearest(grid, px, py));
+  });
+  panelEl.addEventListener('mouseleave', hideTip);
+}
+
+/* ══ 键盘：整张网格一个 Tab 停靠点，方向键在其中走游标 ══
+   鼠标能看到的数值，键盘也要能看到，否则数据就只能靠悬浮才拿得到 */
+var cursorKey = null;
+
+function activeGrid(){ return view === 'year' ? gridYear : gridMonth; }
+
+function placeCursor(cell, announce){
+  var grid = activeGrid();
+  if (!cell) return;
+  var prev = grid.querySelector('.cell.cursor');
+  if (prev) prev.classList.remove('cursor');
+  cell.classList.add('cursor');
+  cursorKey = cell.dataset.k;
+  showTip(cell);
+  if (announce){
+    var v = +cell.dataset.v;
+    liveEl.textContent = cell.dataset.d + '，' + (v === 0 ? '没有贡献' : v + ' 次贡献');
+  }
+}
+
+function cursorPos(grid, cell){
+  var cells = [...grid.querySelectorAll('.cell')];
+  var i = cells.indexOf(cell);
+  if (i < 0) return null;
+  return grid.classList.contains('month')
+    ? { row: Math.floor(i / MCOLS), col: i % MCOLS }
+    : { row: i % 7, col: Math.floor(i / 7) };
+}
+
+function moveCursor(grid, dr, dc){
+  var cur = grid.querySelector('.cell.cursor');
+  if (!cur){
+    var first = grid._at['0,0'] || Object.values(grid._at)[0];
+    placeCursor(first, true); return;
+  }
+  var p = cursorPos(grid, cur);
+  if (!p) return;
+  var isMonth = grid.classList.contains('month');
+  var maxR = isMonth ? MROWS - 1 : 6;
+  var maxC = isMonth ? MCOLS - 1 : 52;
+  var r = p.row, c = p.col, guard = 0;
+  /* 空位（当月之外的那几格）直接跳过去 */
+  do {
+    r += dr; c += dc;
+    if (r < 0 || r > maxR || c < 0 || c > maxC) return;
+    guard++;
+  } while (!grid._at[r + ',' + c] && guard < 60);
+  var t = grid._at[r + ',' + c];
+  if (t) placeCursor(t, true);
+}
+
+[gridYear, gridMonth].forEach(function(grid){
+  grid.addEventListener('keydown', function(e){
+    var k = e.key, dr = 0, dc = 0;
+    if      (k === 'ArrowUp')    dr = -1;
+    else if (k === 'ArrowDown')  dr =  1;
+    else if (k === 'ArrowLeft')  dc = -1;
+    else if (k === 'ArrowRight') dc =  1;
+    else if (k === 'Home'){ placeCursor(grid._at['0,0'] || Object.values(grid._at)[0], true); e.preventDefault(); return; }
+    else if (k === 'End'){ var v = Object.values(grid._at); placeCursor(v[v.length - 1], true); e.preventDefault(); return; }
+    else return;
+    e.preventDefault();
+    moveCursor(grid, dr, dc);
+  });
+  grid.addEventListener('focus', function(){
+    /* 不给个初始游标的话，Tab 进来会看不到任何焦点提示 */
+    if (!grid.querySelector('.cell.cursor')) moveCursor(grid, 0, 0);
+  });
+  grid.addEventListener('blur', function(){
+    hideTip();
+    var c = grid.querySelector('.cell.cursor');
+    if (c) c.classList.remove('cursor');
+    cursorKey = null;
+  });
+});
+
+/* ══ 视图切换：先把当月那一列留下、其余上滑淡出，再让当月格子形变展开 ══ */
+var view = 'year', busy = false;
+var REDUCE = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function cardRel(el){
+  var c = cardEl.getBoundingClientRect(), r = el.getBoundingClientRect();
+  /* 窄屏时卡片整体套了一层 scale，量到的视口差是缩过的，而形变是把这些差值
+     当卡片内的 translate/scale 用，再被卡片缩一次。所以先除回去，
+     拿到的才是卡片自身坐标下的差值，套上去才对得上 */
+  var s = cardEl.offsetWidth ? c.width / cardEl.offsetWidth : 1;
+  return { x:(r.left - c.left) / s, y:(r.top - c.top) / s, w:r.width / s, h:r.height / s };
+}
+
+function tweenCount(from, to, dur){
+  if (REDUCE || from === to){ countEl.textContent = fmtNum(to); return; }
+  var t0 = null;
+  requestAnimationFrame(function step(now){
+    if (t0 === null) t0 = now;
+    var p = Math.min(1, (now - t0) / dur);
+    var e = 1 - Math.pow(1 - p, 4);            // ease-out-quart，贴近卡片的主曲线
+    countEl.textContent = fmtNum(Math.round(from + (to - from) * e));
+    if (p < 1) requestAnimationFrame(step);
+  });
+}
+
+/* 选中态（aria / tabindex / 滑块）和数据形变分开：键盘只动前者 */
+function selectTab(next, animate){
+  var from = view;
+  view = next;
+  tabs[from].setAttribute('aria-selected', 'false');
+  tabs[from].tabIndex = -1;
+  tabs[next].setAttribute('aria-selected', 'true');
+  tabs[next].tabIndex = 0;
+
+  ind.style.transition = animate ? '' : 'none';
+  ind.style.transform  = next === 'month' ? '' : 'translateX(56px)';
+  if (!animate) requestAnimationFrame(function(){ ind.style.transition = ''; });
+}
+
+function swapDOM(next, keepOut){
+  /* 卡片收窄、第一行跟着左移都挂在卡片这个类上。几条切换路径都经过这里，只留一处 */
+  cardEl.classList.toggle('is-month', next === 'month');
+  /* keepOut：出去的那张先留着。切到本月时年视图的退场要演完，
+     它那批正在淡出的列还得在场上被卡片裁掉，不能一上来就藏 */
+  if (next === 'month'){ viewMonth.classList.remove('off'); if (!keepOut) viewYear.classList.add('off'); }
+  else                 { viewYear.classList.remove('off'); viewMonth.classList.add('off'); }
+  /* 藏起来的那张网格不该留着游标，切回来会凭空冒出一个环 */
+  [gridYear, gridMonth].forEach(function(g){
+    var c = g.querySelector('.cell.cursor');
+    if (c) c.classList.remove('cursor');
+  });
+  hideTip();
+  unitEl.textContent = next === 'month' ? MONTH_LABEL : YEAR + '年贡献';
+  panelEl.setAttribute('aria-labelledby', next === 'month' ? 'tabMonth' : 'tabYear');
+}
+
+var pending = null;
+
+/* 让进行中的形变立刻落到终态。键盘要即时响应，不能等动画跑完 */
+function settleNow(){
+  if (pending){ var p = pending; pending = null; p.finish(); }
+}
+
+function staticSwitch(next){
+  selectTab(next, false);
+  swapDOM(next);
+  viewYear.classList.toggle('out', next === 'month');
+  countEl.textContent = fmtNum(next === 'month' ? totalMonth : totalYear);
+  busy = false;
+}
+
+function paint(next){
+  if (next === view && !busy) return;
+  if (busy) settleNow();
+  if (next === view) return;
+
+  if (REDUCE){ staticSwitch(next); return; }
+
+  var from     = view;
+  var fromGrid = from === 'year' ? gridYear : gridMonth;
+  var toGrid   = next === 'year' ? gridYear : gridMonth;
+  var fromCount = parseFloat(countEl.textContent.replace(/[^\d.]/g, '')) || 0;
+
+  selectTab(next, true);
+  busy = true;
+
+  /* First：先记住当月这些格子此刻在哪。
+     用格子 rect 减去卡片自身的 rect，得到卡片内坐标，这样卡片随后
+     因为变高而在视口里上下移动时，形变的差值依然成立。 */
+  var first = {};
+  fromGrid.querySelectorAll('.cell[data-k]').forEach(function(c){
+    if (inMonth[c.dataset.k]) first[c.dataset.k] = cardRel(c);
+  });
+
+  /* 年视图退场：非当月的格子上滑淡出，当月那几列留在原地等形变。
+     从月视图切回去时同样先藏好，等形变开始再一起放出来。
+     退场和形变同一个起点，不再先等退场跑完：中间那一百多毫秒空档
+     就是切过来要等半拍的原因。退场中会飘到卡片右边的列由 .view-year
+     的裁边接住，两边同一条时间线，谁都跑不出卡片 */
+  viewYear.classList.add('out');
+  swapDOM(next, next === 'month');             // 往月视图走时年视图留着把退场演完
+
+  /* Last：量出目标位置，先反向补偿回去，下一帧再放开 */
+  var moved = [];
+  toGrid.querySelectorAll('.cell[data-k]').forEach(function(c){
+    var f = first[c.dataset.k];
+    if (!f) return;
+    var l  = cardRel(c);
+    var sx = f.w / l.w, sy = f.h / l.h;
+    var dx = (f.x + f.w / 2) - (l.x + l.w / 2);
+    var dy = (f.y + f.h / 2) - (l.y + l.h / 2);
+    if (Math.abs(sx - 1) < .01 && Math.abs(sy - 1) < .01 &&
+        Math.abs(dx) < .5 && Math.abs(dy) < .5) return;
+    c.style.transition = 'none';
+    c.style.transform  = 'translate(' + dx + 'px,' + dy + 'px) scale(' + sx + ',' + sy + ')';
+    moved.push(c);
+  });
+
+  toGrid.offsetHeight;                       // 强制回流，把补偿后的初态钉住
+
+  /* Play */
+  moved.forEach(function(c){
+    c.style.transition = 'transform var(--dur-morph) var(--ease-out)';
+    c.style.transform  = '';
+  });
+  if (next === 'year') viewYear.classList.remove('out');
+
+  tweenCount(fromCount, next === 'month' ? totalMonth : totalYear, 380);
+
+  function done(){
+    clearTimeout(t2);
+    moved.forEach(function(c){ c.style.transition = ''; c.style.transform = ''; });
+    viewYear.classList.toggle('out', next === 'month');
+    /* 退场演完了，出去的那张这时候才真正藏起来 */
+    (next === 'month' ? viewYear : viewMonth).classList.add('off');
+    busy = false;
+    pending = null;
+  }
+  var t2 = setTimeout(done, 420);
+  pending = { finish: done };
+}
+
+document.getElementById('seg').addEventListener('click', function(e){
+  var b = e.target.closest('button[role="tab"]');
+  if (b) paint(b.id === 'tabMonth' ? 'month' : 'year');
+});
+
+/* 键盘切换不播形变：方向键是高频操作，动起来只会觉得卡 */
+document.getElementById('seg').addEventListener('keydown', function(e){
+  var k = e.key;
+  if (k !== 'ArrowLeft' && k !== 'ArrowRight' && k !== 'Home' && k !== 'End') return;
+  e.preventDefault();
+  var want = (k === 'ArrowLeft' || k === 'Home') ? 'month' : 'year';
+  tabs[want].focus();
+  if (want === view) return;
+  settleNow();
+  selectTab(want, false);
+  swapDOM(want);
+  viewYear.classList.toggle('out', want === 'month');
+  countEl.textContent = fmtNum(want === 'month' ? totalMonth : totalYear);
+  busy = false;
+});
+
+/* ══ 身份牌：指针跟随 + 点击波纹 ══
+   倾角、磁吸、抬起、缩放四个量走同一个 rAF 阻尼循环，每帧写进 CSS 变量。
+   不给 transform 加 CSS 过渡，是因为指针每帧都在改目标值，过渡会不停从
+   半路重新开始，出来是糊的。按下时阻尼调紧一档，松手再回到常态。 */
+(function(){
+  var tag = document.getElementById('tag');
+  var fx  = document.getElementById('fx');
+  if (!tag || !fx) return;
+
+  var fine = window.matchMedia('(hover:hover) and (pointer:fine)').matches;
+  var TILT = REDUCE ? 0 : 8;        /* 最大倾角 */
+  var MAG  = REDUCE ? 0 : 5;        /* 最大磁吸位移 */
+  var LIFT = REDUCE ? 0 : -2;       /* 悬浮抬起 */
+
+  var cur  = { rx:0, ry:0, mx:0, my:0, lift:0, sc:1 };
+  var want = { rx:0, ry:0, mx:0, my:0, lift:0, sc:1 };
+  var raf = 0, over = false, held = false;
+
+  function write(){
+    tag.style.setProperty('--rx',    cur.rx.toFixed(2) + 'deg');
+    tag.style.setProperty('--ry',    cur.ry.toFixed(2) + 'deg');
+    tag.style.setProperty('--mag-x', cur.mx.toFixed(2) + 'px');
+    tag.style.setProperty('--mag-y', cur.my.toFixed(2) + 'px');
+    tag.style.setProperty('--lift',  cur.lift.toFixed(2) + 'px');
+    tag.style.setProperty('--sc',    cur.sc.toFixed(3));
+  }
+
+  /* 每帧只吃掉剩余距离的一个固定比例，比例按实际帧间隔折算，
+     所以 120Hz 和 30Hz 下跟手的速度是一样的（首帧和长卡顿都按一帧算）*/
+  var last = 0;
+  function step(now){
+    var dt = last ? Math.min(64, now - last) : 16.7;
+    last = now;
+    var base = held ? .34 : .17;
+    var k = REDUCE ? 1 : 1 - Math.pow(1 - base, dt / 16.7);
+    var settled = true;
+    for (var p in want){
+      cur[p] += (want[p] - cur[p]) * k;
+      if (Math.abs(want[p] - cur[p]) < .002) cur[p] = want[p];
+      else settled = false;
+    }
+    write();
+    if (settled){ raf = 0; last = 0; }
+    else raf = requestAnimationFrame(step);
+  }
+  function kick(){ if (!raf) raf = requestAnimationFrame(step); }
+
+  function aim(e){
+    var r  = tag.getBoundingClientRect();
+    var px = (e.clientX - r.left) / r.width;
+    var py = (e.clientY - r.top)  / r.height;
+    var dx = Math.max(-1, Math.min(1, px * 2 - 1));
+    var dy = Math.max(-1, Math.min(1, py * 2 - 1));
+    want.ry =  dx * TILT;
+    want.rx = -dy * TILT * .7;
+    want.mx =  dx * MAG;
+    want.my =  dy * MAG * .6;
+    tag.style.setProperty('--hx', (px * 100).toFixed(1) + '%');
+    tag.style.setProperty('--hy', (py * 100).toFixed(1) + '%');
+  }
+
+  /* 波纹从指针落点荡开，不是从中心；半径取到最远的那个角，
+     所以点哪儿都能铺满整块牌子 */
+  function ripple(e){
+    if (REDUCE) return;
+    var r = tag.getBoundingClientRect();
+    var s = r.width / tag.offsetWidth || 1;       /* 卡片整体缩小时的比例 */
+    var x = (e.clientX - r.left) / s, y = (e.clientY - r.top) / s;
+    var w = tag.offsetWidth, h = tag.offsetHeight;
+    var R = Math.max(Math.hypot(x, y), Math.hypot(w - x, y),
+                     Math.hypot(x, h - y), Math.hypot(w - x, h - y));
+    var el = document.createElement('span');
+    el.className = 'ripple';
+    el.style.cssText = 'left:' + (x - R) + 'px;top:' + (y - R) + 'px;width:' +
+                       (R * 2) + 'px;height:' + (R * 2) + 'px';
+    fx.appendChild(el);
+    /* 淡出不能跟扩散共用一条 ease-out 曲线：那条曲线前段太快，
+       亮度会在 120ms 内掉光，看起来只剩一下闪。所以给透明度单独排一遍，
+       扩散照旧 ease-out，亮度到四成进度还有一半，波纹才留得住 */
+    el.animate([
+      { transform:'scale(0)',  opacity:.30, offset:0,   easing:'cubic-bezier(.16,1,.3,1)' },
+      { transform:'scale(.62)', opacity:.20, offset:.34, easing:'linear' },
+      { transform:'scale(1)',  opacity:0,   offset:1 }
+    ], { duration:560 }).onfinish = function(){ el.remove(); };
+  }
+
+  if (fine){
+    tag.addEventListener('pointerenter', function(e){
+      over = true;
+      aim(e);
+      want.lift = LIFT; want.sc = 1.03;
+      kick();
+    });
+    tag.addEventListener('pointermove', function(e){
+      if (!over) return;
+      aim(e);
+      kick();
+    });
+    tag.addEventListener('pointerleave', function(){
+      over = false;
+      want.rx = want.ry = want.mx = want.my = 0;
+      want.lift = held ? 1 : 0;
+      want.sc   = held ? .97 : 1;
+      kick();
+    });
+  }
+
+  tag.addEventListener('pointerdown', function(e){
+    held = true;
+    want.lift = 1; want.sc = .97;
+    kick();
+    ripple(e);
+  });
+
+  function release(){
+    if (!held) return;
+    held = false;
+    want.lift = over ? LIFT : 0;
+    want.sc   = over ? 1.03 : 1;
+    kick();
+  }
+  /* 挂在 window 上：按下之后把指针拖出牌子再松手，pointerup 不会回到按钮，
+     状态就会永远停在按住那一档。挂在 window 上就一定能收到 */
+  window.addEventListener('pointerup', release);
+  window.addEventListener('pointercancel', release);
+})();
+
+/* ── 首屏：先把身份和空盘摆好，等真数据回来再播入场 ── */
+function firstPaint(label){
+  renderYear(true);
+  renderMonth();
+  countEl.textContent = fmtNum(totalYear);
+  unitEl.textContent  = label;
+  /* 入场动画带 both 填充，不移除会锁死 transform，后面的形变就动不了。
+     身份牌同理：它的 transform 还要留给悬浮和按下，播完必须把类摘掉 */
+  var badgeEl = document.getElementById('tag');
+  badgeEl.classList.add('in');
+  setTimeout(function(){ gridYear.classList.remove('wave'); }, 900);
+  setTimeout(function(){ badgeEl.classList.remove('in'); }, 700);
+  window.dispatchEvent(new Event('resize'));   // 数据一到位就重新校一次窄屏缩放
+}
+
+/* ══ 真数据 ══
+   贡献接口和用户资料两个来源都带 CORS（Access-Control-Allow-Origin: *），
+   本地双击打开也能直接取到，不需要代理。
+   取不到就退回确定性演示数据，并在合计下面标出来，不拿假数据冒充真的。 */
+computeData(new Array(ROWS).fill(0));
+applyIdentity();
+countEl.textContent = '0';
+unitEl.textContent  = '加载中';
+
+/* 接口给的是带 0 补位的 ISO 日期，按日期查表再摊回这 371 天的时间轴 */
+function buildRaw(contrib){
+  var map = {};
+  var rows = contrib && contrib.contributions ? contrib.contributions : [];
+  for (var i = 0; i < rows.length; i++) map[rows[i].date] = rows[i].count | 0;
+  var raw = new Array(ROWS);
+  for (var j = 0; j < ROWS; j++) raw[j] = map[iso(days[j])] || 0;
+  return raw;
+}
+
+function loadLive(){
+  var live = fetch('https://github-contributions-api.jogruber.de/v4/' + GITHUB_USER + '?y=' + new Date().getFullYear())
+    .then(function(r){ if (!r.ok) throw r.status; return r.json(); });
+  var prof = fetch('https://api.github.com/users/' + GITHUB_USER)
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .catch(function(){ return null; });
+
+  Promise.all([live, prof]).then(function(res){
+    var p = res[1];
+    if (p){
+      if (p.name)       CARD.name   = p.name;
+      if (p.login)      CARD.handle = '@' + p.login;
+      if (p.avatar_url) CARD.avatar = p.avatar_url;
+      if (p.html_url)   CARD.url    = p.html_url;
+      applyIdentity();
+    }
+    computeData(buildRaw(res[0]));
+    firstPaint(YEAR + '年贡献');
+  }).catch(function(){
+    computeData(demoData(ROWS));
+    firstPaint('演示数据 · 离线');
+  });
+}
+
+/* ── 窄屏：整张卡等比缩小，不重排格子 ─────────── */
+(function(){
+  var stage = document.getElementById('stage');
+  function fit(){
+    cardEl.style.transform = '';
+    stage.style.width = ''; stage.style.height = '';
+    var w = cardEl.offsetWidth, h = cardEl.offsetHeight;
+    /* 身份牌已经贴齐卡片左边框，横向不再外扩，留 32px 就够 */
+  var avail = document.documentElement.clientWidth - 32;
+    if (w <= avail) return;
+    var s = avail / w;
+    cardEl.style.transformOrigin = 'top left';
+    cardEl.style.transform = 'scale(' + s + ')';
+    /* transform 不会改变布局占位，所以由 stage 预留缩小后的尺寸 */
+    stage.style.width  = (w * s) + 'px';
+    stage.style.height = (h * s) + 'px';
+  }
+  fit();
+  requestAnimationFrame(fit);          // 首帧布局稳定后再校一次
+  window.addEventListener('load', fit);
+  window.addEventListener('resize', function(){ requestAnimationFrame(fit); });
+})();
+
+/* 等布局就位再发请求，回来时卡片尺寸已经量准了 */
+loadLive();
+
+</script>
+
+<!-- ============================================================
+     可选参数（直接开这个文件，或走 card.html?card=heatmap）：
+       user=<登录名>     显示谁的贡献，默认 xiaoYue-cm
+       bg=transparent   去掉 demo 底色（被 iframe 套着时自动生效）
+     尺寸不用额外参数：卡片自带等比缩放，宽度超过 iframe 宽度就整体
+     scale 下去，所以只要 iframe 的宽高够就行。
+     数据源（两个都带 CORS，静态页可直接请求）：
+       贡献日历 https://github-contributions-api.jogruber.de/v4/<user>?y=<年>
+       用户资料 https://api.github.com/users/<user>
+     ============================================================ -->
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var embed = window.self !== window.top || q.get('bg') === 'transparent';
+  if (!embed) return;
+  // 这个文件原本的样式块不动，嵌入模式需要的两条规则在这里补
+  var st = document.createElement('style');
+  st.textContent = 'html.lc-embed body{background:none;padding:0}';
+  document.head.appendChild(st);
+  document.documentElement.classList.add('lc-embed');
+})();
+</script>
+</body>
+</html>

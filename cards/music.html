@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>music 播放卡片</title>
+<style>
+/* ============================================================
+   三态：
+   1 默认   只有一个圆盘
+   2 悬停   正方形从圆盘背后长出来，把圆盘包住
+   3 点击   长方体从正方形右侧长出来（比正方形矮，压在它下面）
+   再点圆盘或正方形 → 收回（音乐继续放）；鼠标移开 → 也回到 1。
+   收起时两块一起缩：正方形成比例缩小、长方体同时收长收窄，
+   两条曲线一致，所以长方体的上下边永远露不出来。
+   圆盘全程不动、不变形，只由 .vinyl 自转。
+   播放/暂停只归播放键，圆盘和正方形的点击只管开合。
+   ============================================================ */
+:root{
+  --cream:#F3DEBA;
+  --paper:#FBF3E4;
+  --sage:#ABC4AA;
+  --brown:#675D50;
+  --deep:#574E42;
+  --ink:#3B362E;
+  --sage-hover:#BBD0B9;     /* 播放键 hover 的浅鼠尾草 */
+  /* 半透明一律走这三个分量： rgb(var(--cream-rgb) / .28) */
+  --cream-rgb:243 222 186;
+  --brown-rgb:103 93 80;
+  --sage-rgb:171 196 170;
+  --shadow-rgb:60 52 42;
+
+  /* ---- 尺寸：整张卡片只认 --u 这一个参数 ----
+     --u 是基准单位，1px 就是现在这个大小。
+     窄屏、侧栏、或者嵌进别人的页面里想整体缩小，只改 --u，
+     下面所有尺寸和字号都跟着走（比例见各自注释）。
+     1px 级的描边不参与缩放，否则小尺寸下会糊掉。 */
+  /* 默认按视口自动缩到「刚好放得下」，最多 1px：
+     展开后卡片右边缘在视口里的位置 = 视口一半 + 316 * --u，所以除数取 632。
+     显式传 ?u=0.8 会盖过这个默认值（内联样式优先于样式表规则）。 */
+  --u:min(1px, calc((100vw - 24px) / 632));
+  --disc:calc(68 * var(--u));                     /* 圆盘直径，三态恒定 */
+  --pad:calc(10 * var(--u));                      /* 圆盘在正方形里的留白 */
+  --sq:calc(var(--disc) + var(--pad) * 2);        /* 正方形边长 */
+  --body-h:var(--disc);                           /* 上下边跟圆盘齐平（圆盘内切） */
+  --body-h-min:calc(var(--disc) - 4 * var(--u));  /* 收起时的高：只比圆盘小一点点 */
+  --body-w:calc(316 * var(--u));                  /* 长方体长度 */
+  --body-x:calc(var(--pad) + var(--disc) / 2);    /* 左端落在圆盘圆心，接缝在圆盘正中间 */
+  --radius:calc(22 * var(--u));
+  --fs-title:calc(16 * var(--u));
+  --fs-meta:calc(11.5 * var(--u));
+  /* 正方形收缩的下限。长方体现在会同步收窄（--body-h-min），
+     露边与否不再靠这个数兜底，所以它只是观感参数：
+     取 .79 时正方形收到 69.5，始终比圆盘(68)大一点，一路都完整包着圆盘；
+     想让它最后缩进圆盘里，可以调到 .773 以下 */
+  --plate-min:.79;
+
+  --ease:cubic-bezier(.22,.9,.26,1);
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  display:grid;place-items:center;
+  overflow:hidden;
+  font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  background:radial-gradient(120% 120% at 16% 8%,#FDF8EC 0%,#F1E5CC 54%,#E4D4B4 100%);
+  color:var(--ink);
+  -webkit-font-smoothing:antialiased;
+}
+
+.stage{display:flex;flex-direction:column;align-items:center;gap:26px}
+
+/* 盒子只占正方形那么大；长方体是绝对定位溢出出去的，
+   祖先的 :hover 靠后代包含关系维持，所以鼠标走到长方体上不会掉出 hover */
+.player{position:relative;width:var(--sq);height:var(--sq)}
+
+.card{
+  position:absolute;inset:0;
+  cursor:pointer;outline:none;
+  -webkit-tap-highlight-color:transparent;
+}
+
+/* ---------- 长方体：从正方形右侧长出来，先躲在正方形下面 ---------- */
+.body{
+  position:absolute;left:var(--body-x);top:50%;z-index:0;
+  width:0;height:var(--body-h-min);
+  transform:translateY(-50%);
+  /* 左端是半圆：半径 = 高度的一半，正好贴住圆盘的右半边，接缝落在圆心。
+     高被收窄的时候浏览器按比例夹住半径，所以它一直是个半圆 */
+  border-radius:calc(var(--body-h) / 2) var(--radius) var(--radius) calc(var(--body-h) / 2);
+  background-color:var(--brown);
+  box-shadow:0 0 0 rgb(var(--brown-rgb) / 0);
+  overflow:hidden;
+  /* 收起态：长、高、正方形三者同步，.44s 一起收完。
+     高和正方形用同一条曲线，所以任何一帧长方体都不会比正方形高 */
+  transition:width .44s var(--ease),height .44s var(--ease),box-shadow .25s ease;
+}
+.card.open .body{
+  width:var(--body-w);
+  height:var(--body-h);
+  box-shadow:
+    calc(6 * var(--u)) calc(6 * var(--u)) 0 rgb(var(--brown-rgb) / .14),
+    0 calc(22 * var(--u)) calc(32 * var(--u)) calc(-20 * var(--u)) rgb(var(--shadow-rgb) / .9);
+  /* 展开态：慢慢抽出来 */
+  transition:width .5s var(--ease),height .5s var(--ease),box-shadow .3s ease;
+}
+
+/* ---------- 正方形：默认缩在圆盘背后，悬停时展开包住圆盘 ---------- */
+.plate{
+  position:absolute;inset:0;z-index:1;
+  border:1.5px solid rgb(var(--brown-rgb) / 0);
+  border-radius:var(--radius);
+  background-color:var(--paper);
+  box-shadow:0 0 0 0 rgb(var(--brown-rgb) / 0);
+  opacity:0;
+  transform:scale(var(--plate-min));
+  /* 收起态：正方形第一帧就跟着缩（不等人），只是淡出晚一点，
+     好让它盖着长方体缩回去，不会中途露出一个没套子的长方体 */
+  transition:
+    opacity .3s ease .16s,
+    transform .44s var(--ease),
+    border-color .3s ease,
+    box-shadow .3s ease;
+}
+.card:hover .plate,
+.card:focus-visible .plate,
+.card.open .plate{
+  opacity:1;
+  transform:scale(1);
+  border-color:rgb(var(--brown-rgb) / .5);
+  box-shadow:0 calc(8 * var(--u)) calc(18 * var(--u)) calc(-10 * var(--u)) rgb(var(--brown-rgb) / .85);
+  /* 展开态：不走延迟，点击那一帧就长 */
+  transition:
+    opacity .16s ease,
+    transform .44s var(--ease),
+    border-color .3s ease,
+    box-shadow .3s ease;
+}
+.card.open .plate{box-shadow:0 calc(9 * var(--u)) calc(20 * var(--u)) calc(-12 * var(--u)) rgb(var(--brown-rgb) / .9)}
+
+/* ---------- 圆盘 ---------- */
+.disc{
+  position:absolute;z-index:2;
+  left:var(--pad);top:50%;
+  width:var(--disc);height:var(--disc);
+  transform:translateY(-50%);
+}
+.vinyl{
+  position:absolute;inset:0;border-radius:50%;
+  background:
+    repeating-radial-gradient(circle at 50% 50%,
+      rgb(var(--cream-rgb) / .11) 0 calc(1.3 * var(--u)),
+      rgb(var(--cream-rgb) / 0) calc(1.3 * var(--u)) calc(4.2 * var(--u))),
+    radial-gradient(circle at 50% 46%,#6F6556 0%,var(--brown) 58%,#4E463B 100%);
+  box-shadow:
+    inset 0 0 0 calc(2 * var(--u)) rgb(var(--cream-rgb) / .3),
+    0 calc(5 * var(--u)) calc(12 * var(--u)) calc(-5 * var(--u)) rgb(var(--shadow-rgb) / .7);
+  animation:spin 2.6s linear infinite;
+  animation-play-state:paused;
+}
+.vinyl::before{          /* 标签 */
+  content:"";position:absolute;inset:27%;border-radius:50%;
+  background:radial-gradient(circle at 34% 28%,#C9DBC6 0%,var(--sage) 78%);
+  box-shadow:inset 0 0 0 1px rgb(var(--shadow-rgb) / .22),0 0 0 1px rgb(var(--cream-rgb) / .12);
+}
+.vinyl::after{           /* 中心孔：走百分比 + translate 居中，缩放时不用改 */
+  content:"";position:absolute;left:50%;top:50%;
+  width:13%;height:13%;border-radius:50%;
+  transform:translate(-50%,-50%);
+  background:var(--ink);
+  box-shadow:0 0 0 calc(2 * var(--u)) rgb(var(--cream-rgb) / .5);
+}
+.gloss{                  /* 让自转看得出来的一道反光 */
+  position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(from 0deg,
+    rgb(255 255 255 / 0) 0deg,rgb(255 255 255 / .2) 26deg,rgb(255 255 255 / 0) 62deg,
+    rgb(255 255 255 / 0) 198deg,rgb(255 255 255 / .1) 232deg,rgb(255 255 255 / 0) 266deg);
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.player.playing .vinyl{animation-play-state:running}
+
+/* ---------- 长方体里的内容 ---------- */
+.panel{
+  /* left 从长方体左端量起：60 + --body-x(44) = 104，正方形(88)右边留 16px；
+     right 78 = 播放键 right(18) + 宽(46) + 间隙(14) */
+  position:absolute;left:calc(60 * var(--u));right:calc(78 * var(--u));top:50%;
+  display:flex;flex-direction:column;gap:calc(7 * var(--u));
+  opacity:0;visibility:hidden;
+  transform:translateY(-50%) translateX(calc(-8 * var(--u)));
+  transition:opacity .18s ease,transform .3s var(--ease),visibility 0s .2s;
+}
+.card.open .panel{
+  opacity:1;visibility:visible;
+  transform:translateY(-50%) translateX(0);
+  transition:opacity .26s ease .1s,transform .44s var(--ease) .06s,visibility 0s;
+}
+.row{display:flex;align-items:baseline;justify-content:space-between;gap:calc(12 * var(--u))}
+.title{
+  font-size:var(--fs-title);font-weight:650;letter-spacing:.1px;
+  color:var(--cream);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.time{
+  flex:none;
+  font-size:var(--fs-meta);font-variant-numeric:tabular-nums;letter-spacing:.3px;
+  color:rgb(var(--cream-rgb) / .5);
+}
+.artist{
+  font-size:var(--fs-meta);letter-spacing:1.2px;text-transform:uppercase;
+  color:rgb(var(--cream-rgb) / .55);
+}
+
+.bar{
+  position:relative;
+  height:calc(5 * var(--u));border-radius:99px;
+  background:rgb(var(--cream-rgb) / .2);
+  cursor:pointer;
+}
+.bar::before{content:"";position:absolute;inset:calc(-8 * var(--u)) calc(-4 * var(--u))}
+.fill{
+  width:0;height:100%;border-radius:99px;
+  background:var(--sage);
+  box-shadow:0 0 8px rgb(var(--sage-rgb) / .7);
+}
+.knob{
+  position:absolute;top:50%;left:0;
+  width:calc(11 * var(--u));height:calc(11 * var(--u));border-radius:50%;
+  transform:translate(-50%,-50%);
+  background:var(--cream);
+  box-shadow:0 1px 3px rgb(0 0 0 / .35);
+  opacity:0;transition:opacity .2s ease;
+}
+.bar:hover .knob{opacity:1}
+
+.play{
+  position:absolute;right:calc(18 * var(--u));top:50%;z-index:1;
+  width:calc(46 * var(--u));height:calc(46 * var(--u));padding:0;
+  display:grid;place-items:center;
+  border:0;border-radius:50%;
+  background:var(--sage);
+  color:var(--ink);
+  cursor:pointer;
+  opacity:0;visibility:hidden;
+  transform:translateY(-50%) scale(.7);
+  box-shadow:inset 0 0 0 1px rgb(255 255 255 / .25),0 calc(2 * var(--u)) 0 rgb(0 0 0 / .18);
+  transition:opacity .18s ease,transform .34s var(--ease),background .2s ease,visibility 0s .2s;
+}
+.card.open .play{
+  opacity:1;visibility:visible;
+  transform:translateY(-50%) scale(1);
+  transition:opacity .22s ease .12s,transform .38s var(--ease) .1s,background .2s ease,visibility 0s;
+}
+.play:hover{background:var(--sage-hover)}
+.play:active{transform:translateY(-50%) scale(.9)}
+.ico{width:calc(19 * var(--u));height:calc(19 * var(--u));display:block}
+.ico-pause{display:none}
+.player.playing .ico-play{display:none}
+.player.playing .ico-pause{display:block}
+
+.hint{
+  margin:0;
+  font-size:12px;letter-spacing:1.8px;
+  color:rgb(var(--brown-rgb) / .42);
+  transition:opacity .35s ease;
+}
+.hint.dim{opacity:0}
+
+/* ---------- 嵌入模式 ----------
+   被 iframe 套着，或显式 ?bg=transparent 时加上 html.lc-embed：
+   去掉 demo 底色和提示文字；卡片改成靠左，因为面板只会往右长，
+   靠左的话 iframe 的尺寸就等于展开后的实际占用，不会白占一块地方
+   （iframe 里那部分空白是透明的，不会遮住宿主页面） */
+html.lc-embed body{background:none;place-items:center start}
+html.lc-embed .hint{display:none}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms!important;transition-duration:.1s!important}
+}
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="player" id="player">
+    <div class="card" id="card" role="button" tabindex="0"
+         aria-expanded="false" aria-label="展开音乐播放卡片">
+
+      <div class="body" id="body">
+        <div class="panel">
+          <div class="row">
+            <span class="title">I Am a Fluff</span>
+            <span class="time" id="time">0:00</span>
+          </div>
+          <div class="artist">Mili</div>
+          <div class="bar" id="bar" role="slider" tabindex="0" aria-label="播放进度"
+               aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="fill" id="fill"></div>
+            <div class="knob" id="knob"></div>
+          </div>
+        </div>
+
+        <button class="play" id="play" aria-label="播放">
+          <svg class="ico ico-play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 4.8v14.4L20 12z" fill="currentColor"/>
+          </svg>
+          <svg class="ico ico-pause" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 4.5h4v15H7zM13 4.5h4v15h-4z" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+
+      <span class="plate" aria-hidden="true"></span>
+
+      <div class="disc" id="disc" aria-hidden="true">
+        <span class="vinyl"><span class="gloss"></span></span>
+      </div>
+    </div>
+
+    <audio id="audio" preload="metadata" loop></audio>
+  </div>
+
+  <p class="hint" id="hint">悬停变方 · 点击展开</p>
+</div>
+
+<!-- ============================================================
+     可选参数（直接开这个文件，或走 card.html?card=music）：
+       u=0.8             整卡缩放基准，1 = 默认大小（对应 CSS 里的 --u）。
+                         不给就按视口自动缩到刚好放得下，最多 1px
+       src=<音频直链>     要放的音频。不给就只有动画没有声音（走假进度）
+       title= / artist=   覆盖曲名和艺人
+       bg=transparent    去掉 demo 底色（被 iframe 套着时自动生效）
+     例：cards/music.html?u=0.8&title=我 的 歌&artist=Someone&src=https://…/a.mp3
+     ============================================================ -->
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var root = document.documentElement;
+  var embed = window.self !== window.top || q.get('bg') === 'transparent';
+  if (embed) root.classList.add('lc-embed');
+
+  var u = parseFloat(q.get('u'));
+  if (isFinite(u) && u > 0) root.style.setProperty('--u', u + 'px');
+
+  window.LC = {
+    embed: embed,
+    /* 被 iframe 套着时不主动去要本地音源（仓库里没有音频文件，白 404）；
+       直接开这个文件（不在 iframe 里）就用同目录的示例音频 */
+    src:   q.get('src') || (embed ? '' : 'Mili - I Am a Fluff.mp3'),
+    title: q.get('title') || '',
+    artist:q.get('artist') || ''
+  };
+})();
+</script>
+
+<script>
+(function () {
+  const player = document.getElementById('player');
+  const card   = document.getElementById('card');
+  const audio  = document.getElementById('audio');
+  const playBtn= document.getElementById('play');
+  const bar    = document.getElementById('bar');
+  const fill   = document.getElementById('fill');
+  const knob   = document.getElementById('knob');
+  const timeEl = document.getElementById('time');
+  const hint   = document.getElementById('hint');
+
+  const FAKE_DUR = 228;   // 音频缺失时兜底用的假时长，保证卡片照样能演示
+  let open = false;
+  let playing = false;
+  let dragging = false;
+  let resumeAfterDrag = false;   // 拖进度条前是不是在放，松手要续上
+  let fake = false;
+  let fakeT = 0;
+  let last = 0;
+  let raf = 0;
+
+  /* ---------- 应用 iframe 参数（解析在文件上方那段 script 里） ---------- */
+  const cfg = window.LC || {};
+  if (cfg.title)  document.querySelector('.title').textContent  = cfg.title;
+  if (cfg.artist) document.querySelector('.artist').textContent = cfg.artist;
+  if (cfg.src) audio.src = cfg.src;
+  else fake = true;   // 没给音频：直接走假进度，动画、拖动、播放键照常演示
+
+  const fmt = s => {
+    s = Math.max(0, Math.floor(s || 0));
+    return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  };
+
+  /* ---------- 点击展开 / 移开收回 ---------- */
+  function setOpen(v) {
+    if (open === v) return;
+    open = v;
+    card.classList.toggle('open', v);
+    card.setAttribute('aria-expanded', String(v));
+    card.setAttribute('aria-label', v ? '音乐播放卡片' : '展开音乐播放卡片');
+    // 展开后里面才有可操作控件：外层从 button 降级成 group，别嵌 button
+    card.setAttribute('role', v ? 'group' : 'button');
+    if (v) { hint.classList.add('dim'); play(); }   // 展开那一帧就开始放，不留空档
+  }
+
+  /* ---------- 进度 ---------- */
+  function render() {
+    const t = fake ? fakeT : (audio.currentTime || 0);
+    const d = fake ? FAKE_DUR
+                   : (isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0);
+    const p = d ? Math.min(1, t / d) : 0;
+    fill.style.width = (p * 100) + '%';
+    knob.style.left  = (p * 100) + '%';
+    timeEl.textContent = fmt(t) + (d ? ' / ' + fmt(d) : '');
+    bar.setAttribute('aria-valuenow', Math.round(p * 100));
+  }
+
+  function frame(ts) {
+    if (!playing) return;
+    if (fake) fakeT = (fakeT + (ts - last) / 1000) % FAKE_DUR;
+    last = ts;
+    render();
+    raf = requestAnimationFrame(frame);
+  }
+
+  function setPlaying(v) {
+    playing = v;
+    player.classList.toggle('playing', v);
+    playBtn.setAttribute('aria-label', v ? '暂停' : '播放');
+    cancelAnimationFrame(raf);
+    if (v) { last = performance.now(); raf = requestAnimationFrame(frame); }
+    else render();
+  }
+
+  /* ---------- 播放控制 ---------- */
+  function play() {
+    if (fake) { setPlaying(true); return; }
+    // 只有真拿不到音频才切假进度：自动播放策略拦截(NotAllowedError)、
+    // 被下一次 play/pause 打断(AbortError) 都不该把真音频顶掉
+    audio.play().catch(() => { if (audio.error) { fake = true; play(); } });
+  }
+  function toggle() {
+    if (fake) { setPlaying(!playing); return; }
+    if (audio.paused) play(); else audio.pause();
+  }
+
+  audio.addEventListener('play',  () => setPlaying(true));
+  audio.addEventListener('pause', () => setPlaying(false));
+  audio.addEventListener('loadedmetadata', render);
+  audio.addEventListener('error', () => { fake = true; render(); });
+
+  /* ---------- 交互 ---------- */
+  // 点圆盘或正方形：展开 / 再点一下收回。播放只归播放键管，这里不碰
+  card.addEventListener('click', () => setOpen(!open));
+  // 移开就缩回圆盘；拖进度条时指针本来就常滑出卡片，这时不能收
+  card.addEventListener('mouseleave', () => { if (!dragging) setOpen(false); });
+  bar.addEventListener('click', e => e.stopPropagation());   // 点进度条只调速，别触发开合
+  playBtn.addEventListener('click', e => { e.stopPropagation(); toggle(); });
+
+  card.addEventListener('keydown', e => {
+    if (e.target !== card) return;      // 焦点在播放键/进度条上时，按键归它们自己管
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    setOpen(!open);
+  });
+
+  /* 进度条拖动 / 点击 / 方向键 */
+  function seek(clientX) {
+    const r = bar.getBoundingClientRect();
+    const p = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    if (fake) { fakeT = p * FAKE_DUR; render(); return; }
+    if (isFinite(audio.duration)) { audio.currentTime = p * audio.duration; render(); }
+  }
+  bar.addEventListener('pointerdown', e => {
+    dragging = true;
+    resumeAfterDrag = playing;        // 记住拖之前是不是在放
+    if (resumeAfterDrag) {            // 拖动期间先停声，不然一边拖一边出声音很脏
+      if (fake) setPlaying(false); else audio.pause();
+    }
+    bar.setPointerCapture(e.pointerId);
+    seek(e.clientX);
+  });
+  bar.addEventListener('pointermove', e => { if (dragging) seek(e.clientX); });
+
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    if (resumeAfterDrag) { resumeAfterDrag = false; play(); }   // 松手照常续上
+  }
+  bar.addEventListener('pointerup', endDrag);
+  // 触屏/触控笔手势被系统接管时来的是 pointercancel 而不是 pointerup，
+  // 少这一条 dragging 会卡在 true，之后鼠标移开就不再自动收起
+  bar.addEventListener('pointercancel', endDrag);
+  bar.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const step = e.key === 'ArrowRight' ? 5 : -5;
+    if (fake) { fakeT = Math.min(FAKE_DUR, Math.max(0, fakeT + step)); render(); return; }
+    audio.currentTime = Math.min(audio.duration || 0, Math.max(0, audio.currentTime + step));
+    render();
+  });
+
+  /* 点外面 / Esc 收回 */
+  document.addEventListener('pointerdown', e => {
+    if (open && !player.contains(e.target)) setOpen(false);
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') setOpen(false);
+  });
+
+  render();
+})();
+</script>
+</body>
+</html>
