@@ -1,4 +1,4 @@
-# Little_card 🐾
+# Little_card 
 
 喵~ 这里是一窝自包含的小卡片喵。每张卡就是一个 HTML 文件，不吃框架、不用构建，塞进 iframe 里就能住下啦喵！
 
